@@ -1,0 +1,280 @@
+module bfloat16_adder (output logic [15:0] sum, output logic ready, input logic [15:0] a, b, input logic clock, nreset);
+	
+//Registers for Extraction of input 'a' and 'b'
+logic sign_a, sign_b; //sign
+logic [7:0] exp_a, exp_b; //exponent
+logic [6:0] mant_a, mant_b; //mantissa
+
+//Mantissas with 1 Restored
+logic [7:0] mant_a_rest; //Mantissa with 1 restored; hence 1 extra bit
+logic [7:0] mant_b_rest; //Mantissa with 1 restored; hence 1 extra bit
+
+// Sum or Difference Register
+logic [8:0] mant_sum_diff; //mantissa sum or diff depending on operation; 1 extra bit since both mantissa MSBs can be 1 and cause overflow 
+
+//Registers for Results
+logic sign_rslt; //sign result
+logic [6:0] mant_rslt; //mantissa result
+logic [7:0] exp_rslt; //exponent result
+
+//Registers for intermediate shifting calculations
+logic [7:0] mant_shift; //shifted mantissa 
+logic [7:0] mant_nonshift; //nonshifted mantissa
+
+//States: Start, Input_1 Extraction, Input_2 Extraction, Add/Sub. Normalise, Result, Finish/End
+enum {start, input_1, input_2, sp_case, shift, add_sub, norm, result, finish} state;
+
+
+always_ff @ (posedge clock or negedge nreset)	
+
+	begin //Synchronous Design
+
+		////$monitor("State=%d, Sum=%b, Ready=%b, Exp_rslt=%b, Mant_rslt=%b, Sign_rslt=%b", state, sum, ready, exp_rslt, mant_rslt, sign_rslt);
+
+		if (~nreset)	
+			begin	//active low asynchronous reset to set the contents of all registers to 0 as per assignment requirement				 
+				sign_a <=0;
+				sign_b <= 0;
+				exp_a <=0;
+				exp_b <= 0;
+				mant_a <=0;
+				mant_b <= 0;			
+				mant_a_rest <= 0;
+				mant_b_rest <= 0;
+				mant_sum_diff <= 0;
+				sign_rslt <= 0;
+				mant_rslt <= 0;
+				exp_rslt <= 0;
+				mant_shift <= 0;
+				mant_nonshift <= 0;
+				sum <= 0;
+				ready <= 1; //ready = 1; Can take inputs in next clock cycle i.e. if Reset condition ends
+				
+				state <= start; //Transition to next state; Start Adder
+			end
+			
+		else	
+			begin //Adder Design	
+				case (state) //State Machine
+					start : 
+						begin 
+							ready <= 0;
+							sum <= 0;
+							sign_rslt <= 0;
+							mant_rslt <= 0;
+							exp_rslt <= 0;
+			
+							state <= input_1; //Transition to next state; Take Input from 'a'
+						end
+			
+					input_1 : 
+						begin //Extract Input 'a' Sign, Exponent and Mantissa
+							sign_a <= a [15]; //sign of 'a'
+							exp_a <= a [14:7]; //exponent of 'a', biased by 'd127	
+							mant_a <= a [6:0]; //mantissa of 'a'
+							mant_a_rest <= {1'b1, a [6:0]}; //restoring 1 to bit 7
+							
+							state <= input_2; //Transition to next state: Take Input from 'b'
+						end 
+			
+					input_2 : 
+						begin //Extract Input 'b' Sign, Exponent and Mantissa
+							sign_b <= b [15];
+							exp_b <= b [14:7];
+							mant_b <= b [6:0]; 
+							mant_b_rest <= {1'b1, b [6:0]}; //restoring 1 to bit 7
+			
+							state <= sp_case; //Transition to next state: Perform Shifting
+						end
+						
+					sp_case :
+						begin
+							if( (|exp_a || |mant_a || |exp_b || |mant_b) == 0) // Testing for 0 + 0. 
+							//Checks if all exponents and matissas bits are zero using Unary Operators and OR logic 
+								begin 
+									mant_sum_diff <= 9'b000000001; //resulting in Sum == 0;
+									
+									state <= norm; //Transition to next state: Normalize. instead of shift as both inputs are already 0, sum is 0
+								end
+							
+							else if (&exp_a && ~&mant_a) //Checks if 1st number is Infinity. (Positive or Negative both conditions)
+							//Checks if all bits of Exponent are 1 and all bits of mantissa are 0 and ANDs them
+								begin 
+									mant_rslt <= 7'b0; //
+									exp_rslt <= 8'b11111111;
+									sign_rslt <= sign_a;
+									
+									state <= result; //Transition to next state: Result. instead of shift as input Infinity
+								end 
+								
+							else if (&exp_b && ~&mant_b)//Checks if 2nd number is Infinity. (Positive or Negative both conditions)
+							//Checks if all bits of Exponent are 1 and all bits of mantissa are 0 and ANDs them
+								begin 
+									mant_rslt <= 7'b0;
+									exp_rslt <= 8'b11111111;
+									sign_rslt <= sign_b;
+									
+									state <= result; //Transition to next state: Result. instead of shift as input Infinity
+								end
+								
+							else if (&exp_a) //Checks if 'a' is NaN
+							//Check if either Exponent of 'a' or 'b' are all Ones, i.e. NaN
+								begin
+									mant_rslt <= mant_a;;
+									exp_rslt <= 8'b11111111;
+									sign_rslt <= sign_a;
+									
+									state <= result; //Transition to next state: Result. instead of shift as input Infinity
+								end
+								
+							else if (&exp_b) //Checks for NaN
+							//Check if either Exponent of 'a' or 'b' are all Ones, i.e. NaN
+								begin
+									mant_rslt <= mant_b;
+									exp_rslt <= 8'b11111111;
+									sign_rslt <= sign_b;
+									sign_rslt <= sign_b;
+									
+									state <= result; //Transition to next state: Result. instead of shift as input Infinity
+								end
+								
+							else //No Special Cases found 
+								state <= shift; //Transition to next state: Shift
+						end
+							
+			
+					shift : 
+						begin
+							//$display("Input_2: sign_b=%b, exp_b=%b, mant_b=%b", sign_b, exp_b, mant_b); //Checks if both inputs are 0
+							//Check for Special Cases, if not then perform as nornal
+							if (exp_a > exp_b) 
+								begin //Perform Shifting of 'b' to right if Exp 'a' is larger. Assigns Exponent and Sign Results here
+									mant_shift <= {mant_b_rest} >> (exp_a - exp_b); 
+									mant_nonshift <= {mant_a_rest};                
+									exp_rslt <= exp_a;
+									sign_rslt <= sign_a;
+								end
+
+							else if (exp_b > exp_a) 
+								begin //Perform Shifting of 'a' to right if Exp 'b' is larger. Assigns Exponent and Sign Results here
+									mant_shift <= {mant_a_rest} >> (exp_b - exp_a); 
+									mant_nonshift <= {mant_b_rest};                
+									exp_rslt <= exp_b;
+									sign_rslt <= sign_b;
+								end
+
+							else if (mant_b > mant_a) 
+								begin // For same exponents, Comparing Mantissas. Assigns Exponents and Signs Results here
+									exp_rslt <= exp_b; 
+									mant_shift <= {mant_a_rest};
+									mant_nonshift <= {mant_b_rest};
+									sign_rslt <= sign_b;
+								end
+
+							else  // For same exponents, Comparing Mantissas. Assigns Exponents and Signs Results here
+								begin
+									exp_rslt <= exp_a; 
+									mant_shift <= {mant_b_rest};
+									mant_nonshift <= {mant_a_rest};
+									sign_rslt <= sign_a;
+								end
+			
+							state <= add_sub; //Transition to next state: Perform Addition or Subtraction			
+						end
+					
+						add_sub : 
+							begin
+								//$display("shift: exp_rslt=%b, mant_shift=%b, mant_nonshift=%b, sign_rslt=%b", exp_rslt, mant_shift, mant_nonshift, sign_rslt);
+				
+								if (sign_a == sign_b)	
+									begin //If signs are same, add both mantissas. Sign already evaluated
+										mant_sum_diff <= mant_shift + mant_nonshift;
+									end
+
+								else 
+									begin //If signs are different, subtract both mantissas. Sign already evaluated
+										mant_sum_diff <= mant_nonshift - mant_shift;
+									end
+					
+								state <= norm; //Transition to next state: Normalise the result as mant_sum_diff is 9 bit to include an overflow bit "if" generated
+							end
+									
+						norm : 
+							begin
+								//$display("add_sub: mant_sumdiff=%b", mant_sum_diff);
+								casez (mant_sum_diff) /*Check where MSB 1 is to remove the leading 1 which is assumed. 
+								Also perform increment/decrement of Exponents as shifting takes place of result */
+								9'b1???????? : 
+									begin  
+										exp_rslt <= exp_rslt + 8'b00000001;
+										mant_rslt <= mant_sum_diff[7:1];
+									end // Highest bit set
+								9'b01??????? : 
+									begin
+										mant_rslt <= mant_sum_diff[6:0]; // removing 8th bit 1 to make it unrestored and saving 6:0 (7 bits)
+									end
+								9'b001?????? : 
+									begin  
+										exp_rslt <= exp_rslt - 8'b00000001;
+										mant_rslt <= {mant_sum_diff[5:0],1'b0};
+									end
+								9'b0001????? : 
+									begin  
+										exp_rslt <= exp_rslt - 8'b00000010;
+										mant_rslt <= {mant_sum_diff[4:0],2'b0};
+									end
+								9'b00001???? : 
+									begin  
+										exp_rslt <= exp_rslt - 8'b00000011;
+										mant_rslt <= {mant_sum_diff[3:0],3'b0};
+									end
+								9'b000001??? : 
+									begin  
+										exp_rslt <= exp_rslt - 8'b00000100;
+										mant_rslt <= {mant_sum_diff[2:0],4'b0};
+									end
+								9'b0000001?? : 
+									begin  
+										exp_rslt <= exp_rslt - 8'b00000101;
+										mant_rslt <= {mant_sum_diff[1:0],5'b0};
+									end
+								9'b00000001? : 
+									begin  
+										exp_rslt <= exp_rslt - 8'b00000110;
+										mant_rslt <= {mant_sum_diff[0],6'b0};
+									end
+								9'b000000001 : 
+									begin
+										mant_rslt <= {7'b0};
+									end                 
+								default : 
+									begin //Output Zero
+										mant_rslt <= 7'b0;
+										exp_rslt <= 8'b0;
+										sign_rslt <= 1'b0;
+									end           
+							
+								endcase
+
+							state <= result; //Transition to next state: Output Result and Assert Ready, for next input to be taken
+						end
+						
+						result : 
+							begin
+								////$display("norm: exp_rslt=%b, mant_rslt=%b", exp_rslt, mant_rslt);
+								sum [15:0] <= {sign_rslt, exp_rslt, mant_rslt};
+								ready <= 1;
+								
+								state <= finish; //Transition to next state : End of this Addition calculation 
+							end
+			
+						finish : 
+							begin
+								ready <= 0; //Remove Ready assertion to allow input 
+
+								state <= start; //Transition to State 0 of State Machine 
+							end
+				endcase
+			end
+    end
+    endmodule
