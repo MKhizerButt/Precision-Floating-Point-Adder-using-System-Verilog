@@ -17,7 +17,7 @@ The architecture is driven by a robust **9-state Finite State Machine (FSM)** im
 
 ## Hardware Architecture & Datapath
 
-### 1. Detailed Functionality
+### Detailed Functionality
 
 #### Extraction & Special Cases
 The inputs are split into the respective sign bit, biased exponent bits, and mantissa with a leading 1 restored. Once extracted, special cases (e.g., zeros, infinity, and Not-a-Number) are detected. If such a case is found, the state machine jumps directly to the result state and concludes. For valid inputs, the exponents are compared, and the mantissa with the restored 1 is shifted accordingly. The mantissa with the larger exponent is stored in the non-shift register and vice versa.
